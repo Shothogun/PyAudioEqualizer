@@ -1,114 +1,123 @@
-import pyaudio
-import librosa as lb
-import os
-import struct
-import wave
 import numpy as np
-import matplotlib.pyplot as plt
+from pyqtgraph.Qt import QtGui, QtCore
+import pyqtgraph as pg
+import wave
+import struct
+import pyaudio
 from scipy.fftpack import fft
+
+import sys
 import time
-from tkinter import TclError
-
-# to display in separate Tk window
 
 
-# constants
-CHUNK = 1024 * 2             # samples per frame
-FORMAT = pyaudio.paInt16     # audio format (bytes per sample?)
-CHANNELS = 1                 # single channel for microphone
-RATE = 44100                 # samples per second
+class AudioStream(object):
+    def __init__(self):
 
-# create matplotlib figure and axes
-fig, (ax1, ax2) = plt.subplots(2, figsize=(15, 7))
+        self.wf = wave.open('SoundSamples/1000.wav', 'rb')
 
-wf = wave.open('./SoundSamples/music_sample.wav', 'rb')
-data=[]
-# pyaudio class instance
-pya = pyaudio.PyAudio()
+        # pyqtgraph stuff
+        pg.setConfigOptions(antialias=True)
+        self.traces = dict()
+        self.app = QtGui.QApplication(sys.argv)
+        self.win = pg.GraphicsWindow(title='Spectrum Analyzer')
+        self.win.setWindowTitle('Spectrum Analyzer')
+        self.win.setGeometry(5, 115, 1910, 1070)
 
-# stream object to get data from microphone
-# stream = p.open(
-#     format=FORMAT,
-#     channels=CHANNELS,
-#     rate=RATE,
-#     output=True,
-#     frames_per_buffer=CHUNK
-# )
-# Called whenever a new data is avaiable
-# def callback(in_data, frame_count, time_info, status):
-#     data = wf.readframes(frame_count)
-#     return (data, pyaudio.paContinue)
+        wf_xlabels = [(0, '0'), (2048, '2048'), (4096, '4096')]
+        wf_xaxis = pg.AxisItem(orientation='bottom')
+        wf_xaxis.setTicks([wf_xlabels])
 
-# Open stream using callback
-stream = pya.open(format=FORMAT,
-                channels=CHANNELS,
-                rate=RATE,
-                output=True,
-                frames_per_buffer=CHUNK)
+        wf_ylabels = [(0, '0'), (127, '128'), (255, '255')]
+        wf_yaxis = pg.AxisItem(orientation='left')
+        wf_yaxis.setTicks([wf_ylabels])
 
-# variable for plotting
-x = np.arange(0, 2 * CHUNK, 2)       # samples (waveform)
-xf = np.linspace(0, RATE, CHUNK)     # frequencies (spectrum)
+        sp_xlabels = [(np.log10(10), '10'), (np.log10(100), '100'),
+                      (np.log10(1000), '1000'), (np.log10(10000), '10000')]
+        sp_xaxis = pg.AxisItem(orientation='bottom')
+        sp_xaxis.setTicks([sp_xlabels])
 
-# create a line object with random data
-line, = ax1.plot(x, np.random.rand(CHUNK), '-', lw=2)
+        self.waveform = self.win.addPlot(
+            title='WAVEFORM',
+            row=1,
+            col=1,
+            axisItems={
+                'bottom': wf_xaxis,
+                'left': wf_yaxis
+            },
+        )
+        self.spectrum = self.win.addPlot(
+            title='SPECTRUM',
+            row=2,
+            col=1,
+            axisItems={'bottom': sp_xaxis},
+        )
 
-# create semilogx line for spectrum
-line_fft, = ax2.semilogx(xf, np.random.rand(CHUNK), '-', lw=2)
+        # pyaudio stuff
+        self.FORMAT = pyaudio.paInt16
+        self.CHANNELS = 1
+        self.RATE = 44100
+        self.CHUNK = 1024 * 2
 
-# format waveform axes
-ax1.set_title('AUDIO WAVEFORM')
-ax1.set_xlabel('samples')
-ax1.set_ylabel('volume')
-ax1.set_ylim(0, 255)
-ax1.set_xlim(0, 2 * CHUNK)
-plt.setp(ax1, xticks=[0, CHUNK, 2 * CHUNK], yticks=[0, 128, 255])
+        # define callback (2)
+        def callback(in_data, frame_count, time_info, status):
+            self.data = self.wf.readframes(frame_count)
+            return (self.data, pyaudio.paContinue)
 
-# format spectrum axes
-ax2.set_xlim(20, RATE / 2)
+        self.p = pyaudio.PyAudio()
+        self.stream = self.p.open(
+            format=self.FORMAT,
+            channels=self.wf.getnchannels(),
+            rate=self.wf.getframerate(),
+            output=True,
+            stream_callback=callback)
 
-# show the plot
-plt.show(block=False)
+        # waveform and spectrum x points
+        self.x = np.arange(0, 2 * self.CHUNK, 2)
+        self.f = np.linspace(0, int(self.RATE / 2), int(self.CHUNK / 2))
 
-print('stream started')
+    def start(self):
+        if (sys.flags.interactive != 1) or not hasattr(QtCore, 'PYQT_VERSION'):
+            QtGui.QApplication.instance().exec_()
 
-frame_count = 0
-start_time = time.time()
+    def set_plotdata(self, name, data_x, data_y):
+        if name in self.traces:
+            self.traces[name].setData(data_x, data_y)
+        else:
+            if name == 'waveform':
+                self.traces[name] = self.waveform.plot(pen='c', width=3)
+                self.waveform.setYRange(0, 255, padding=0)
+                self.waveform.setXRange(0, 2 * self.CHUNK, padding=0.005)
+            if name == 'spectrum':
+                self.traces[name] = self.spectrum.plot(pen='m', width=3)
+                self.spectrum.setLogMode(x=True, y=True)
+                self.spectrum.setYRange(-4, 0, padding=0)
+                self.spectrum.setXRange(np.log10(20),
+                                        np.log10(self.RATE / 2),
+                                        padding=0.005)
 
-data = wf.readframes(CHUNK)
-while len(data) > 0:
-    #stream.write(data)
-    data = wf.readframes(CHUNK)
-    
-    # convert data to integers, make np array, then offset it by 127
-    data_int = struct.unpack(str(2 * CHUNK) + 'H', data)
-    
-    # create np array and offset by 128
-    data_np = np.array(data_int, dtype='b')[::2] + 128
-    
-    line.set_ydata(data_np)
-    
-    # compute FFT and update line
-    yf = fft(data_int)
-    line_fft.set_ydata(np.abs(yf[0:CHUNK])  / (65536 * CHUNK))
-    
-    # update figure canvas
-    try:
-        fig.canvas.draw()
-        fig.canvas.flush_events()
-        frame_count += 1
-        
-    except TclError:
-        
-        # calculate average frame rate
-        frame_rate = frame_count / (time.time() - start_time)
-        
-        print('stream stopped')
-        print('average frame rate = {:.0f} FPS'.format(frame_rate))
-        break
-    
-stream.stop_stream()
-stream.close()
+    def update(self):
+        wf_data = self.data
+        wf_data = struct.unpack(str(2 * self.CHUNK) + 'B', wf_data)
+        wf_data = np.array(wf_data, dtype='b')[::2] + 128
+        self.set_plotdata(
+            name='waveform',
+            data_x=self.x,
+            data_y=wf_data,
+        )
 
-wf.close()
-pya.terminate()
+        sp_data = fft(np.array(wf_data, dtype='int8') - 128)
+        sp_data = np.abs(
+            sp_data[0:int(self.CHUNK / 2)]) * 2 / (128 * self.CHUNK)
+        self.set_plotdata(name='spectrum', data_x=self.f, data_y=sp_data)
+
+    def animation(self):
+        timer = QtCore.QTimer()
+        timer.timeout.connect(self.update)
+        timer.start(20)
+        self.start()
+
+
+if __name__ == '__main__':
+
+    audio_app = AudioStream()
+    audio_app.animation()
