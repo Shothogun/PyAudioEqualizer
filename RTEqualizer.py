@@ -1,114 +1,189 @@
+"""
+Project: Python Basic Audio Equalizer
+
+Python 3.8.3
+
+@author: shothogun
+"""
+import sys
+from PyQt5 import QtCore, QtGui, QtWidgets
+from PyQt5.QtCore import Qt
+from PyQt5.QtCore import pyqtSignal as Signal
+from PyQt5.QtWidgets import (QPushButton, QVBoxLayout, QMessageBox,
+                             QMainWindow, QAction, qApp, QApplication, QMenu,
+                             QTextEdit, QFileDialog, QHBoxLayout, QFrame,
+                             QSplitter)
+from PyQt5.QtGui import QIcon
+from pathlib import Path
+from equalizer_bar import EqualizerBar
+
 import numpy as np
-from pyqtgraph.Qt import QtGui, QtCore
-import pyqtgraph as pg
 import wave
+from pydub import AudioSegment
 import struct
 import pyaudio
-from scipy.fftpack import fft
+from scipy.fftpack import rfft, fft
 
 import sys
 import time
 
+import filters
 
-class AudioStream(object):
+class AudioStream(QMainWindow):
     def __init__(self):
+        # Initialize variables
+        self.fileOpened = False
+        self.streaming = True
+        self.stream = None
 
-        self.wf = wave.open('SoundSamples/1000.wav', 'rb')
+        # Init App Widget
+        super().__init__()
+        self.equalize_width = 512
+        self.equalizer = EqualizerBar(self.equalize_width, ['#0C0786', '#40039C', '#6A00A7', '#8F0DA3', '#B02A8F', '#CA4678', '#E06461',
+                                          '#F1824C', '#FCA635', '#FCCC25', '#EFF821', '#EFF821','#EFF821','#EFF821','#EFF821','#EFF821','#EFF821',
+                                          '#EFF821','#EFF821','#EFF821','#EFF821','#EFF821','#EFF821', '#EFF821'])
 
-        # pyqtgraph stuff
-        pg.setConfigOptions(antialias=True)
-        self.traces = dict()
-        self.app = QtGui.QApplication(sys.argv)
-        self.win = pg.GraphicsWindow(title='Spectrum Analyzer')
-        self.win.setWindowTitle('Spectrum Analyzer')
-        self.win.setGeometry(5, 115, 1910, 1070)
+        self.setCentralWidget(self.equalizer)
 
-        wf_xlabels = [(0, '0'), (2048, '2048'), (4096, '4096')]
-        wf_xaxis = pg.AxisItem(orientation='bottom')
-        wf_xaxis.setTicks([wf_xlabels])
+        playBtn = QPushButton('Play', self)
+        playBtn.clicked.connect(self.startStream)
+        playBtn.resize(playBtn.sizeHint())
+        playBtn.move(400, 600)
 
-        wf_ylabels = [(0, '0'), (127, '128'), (255, '255')]
-        wf_yaxis = pg.AxisItem(orientation='left')
-        wf_yaxis.setTicks([wf_ylabels])
+        pauseBtn = QPushButton('Stop', self)
+        pauseBtn.clicked.connect(self.stopStream)
+        pauseBtn.resize(pauseBtn.sizeHint())
+        pauseBtn.move(500, 600)
 
-        sp_xlabels = [(np.log10(10), '10'), (np.log10(100), '100'),
-                      (np.log10(1000), '1000'), (np.log10(10000), '10000')]
-        sp_xaxis = pg.AxisItem(orientation='bottom')
-        sp_xaxis.setTicks([sp_xlabels])
+        # Application Menubar
+        openFile = QAction(QIcon('open.png'), 'Open', self)
+        openFile.setShortcut('Ctrl+O')
+        openFile.setStatusTip('Open new File')
+        openFile.triggered.connect(self.openFileDialog)
 
-        self.waveform = self.win.addPlot(
-            title='WAVEFORM',
-            row=1,
-            col=1,
-            axisItems={
-                'bottom': wf_xaxis,
-                'left': wf_yaxis
-            },
-        )
-        self.spectrum = self.win.addPlot(
-            title='SPECTRUM',
-            row=2,
-            col=1,
-            axisItems={'bottom': sp_xaxis},
-        )
+        exitAct = QAction('Exit', self)
+        exitAct.setShortcut('ESC')
+        exitAct.setStatusTip('Exit application')
+        exitAct.triggered.connect(self.close)
 
-        # pyaudio stuff
+        menubar = self.menuBar()
+        fileMenu = menubar.addMenu('&File')
+        fileMenu.addAction(openFile)
+        fileMenu.addAction(exitAct)
+
+        # Status Bar below
+        self.statusBar().showMessage('Idle')
+
+        self.setGeometry(200, 300, 1000, 1000)
+        self.setWindowTitle('PyEqualizer')
+        self.show()
+
+        sys.exit(app.exec_())
+
+    def startStream(self):
+        if not self.fileOpened:
+            QMessageBox.question(self, 'Warning!', "Please, choose a file",
+                                 QMessageBox.Yes)
+            return
+
+        if self.stream != None and self.stream.is_active():
+            return
+
+        print("Start streaming")
+
+        self.equalizer.setDecayFrequencyMs(100)
+        self._timer = QtCore.QTimer()
+        self._timer.setInterval(100)
+        self._timer.timeout.connect(self.update_values)
+        self._timer.start()
+
+        self.streaming = True
+        # PyAudio Setting
         self.FORMAT = pyaudio.paInt16
         self.CHANNELS = 1
         self.RATE = 44100
         self.CHUNK = 1024 * 2
 
-        # define callback (2)
+        # Play audio on-the-fly
         def callback(in_data, frame_count, time_info, status):
             self.data = self.wf.readframes(frame_count)
+            self.frame_count = frame_count
             return (self.data, pyaudio.paContinue)
 
         self.p = pyaudio.PyAudio()
-        self.stream = self.p.open(
-            format=self.FORMAT,
-            channels=self.wf.getnchannels(),
-            rate=self.wf.getframerate(),
-            output=True,
-            stream_callback=callback)
+        self.stream = self.p.open(format=self.FORMAT,
+                                  channels=self.CHANNELS,
+                                  rate=self.RATE,
+                                  output=True,
+                                  stream_callback=callback,
+                                  frames_per_buffer=self.CHUNK)
 
-        # waveform and spectrum x points
-        self.x = np.arange(0, 2 * self.CHUNK, 2)
-        self.f = np.linspace(0, int(self.RATE / 2), int(self.CHUNK / 2))
+        self.stream.start_stream()
+        #self.plot_audio()
+
+    def stopStream(self):
+        print("Stop Streaming")
+        if self.stream == None:
+            return
+
+        self.stream.stop_stream()
+
+    def update_values(self):
+        if self.stream.is_active():
+            byte_data = self.data
+            data_int_16 = np.frombuffer(byte_data, dtype='<i2')
+            data_int_16 = data_int_16 * np.hamming(len(data_int_16))
+            fft_data = np.abs(fft(data_int_16)[0:self.CHUNK//2])/((self.CHUNK//4)*self.CHUNK)
+            au = fft_data[:(self.CHUNK//4):(self.CHUNK//4)//self.equalize_width]
+            au = [i*100 for i in au]
+            au = list(map(lambda i: 100 if i > 100 else i, au))
+            self.equalizer.setValues([
+                v for v in au
+                ])
+
+    def plotAudio(self):
+        print("Plotting Audio")
+
+    def openFileDialog(self):
+        home_dir = str(Path.home())
+        fname = QFileDialog.getOpenFileName(self, 'Open file', home_dir)
+
+        if fname[0]:
+            self.music_sample_file = fname[0]
+            self.wf = wave.open(fname[0], 'rb')
+            self.fileOpened = True
+
+            if self.wf.getnchannels() > 1:
+                print("File is stereo. Converting...")
+                sound = AudioSegment.from_wav(self.music_sample_file)
+                sound = sound.set_channels(1)
+                sound.export(self.music_sample_file, format="wav")
+                self.wf.close()
+                self.wf = wave.open(self.music_sample_file, "rb")
+
+            print("Music file: " + self.music_sample_file)
+
+    def closeEvent(self, event):
+        print("Are you sure?")
+        reply = QMessageBox.question(self, 'Message', "Are you sure to quit?",
+                                     QMessageBox.Yes | QMessageBox.No,
+                                     QMessageBox.No)
+
+        if reply == QMessageBox.Yes:
+            event.accept()
+        else:
+            event.ignore()
 
     def start(self):
-        if (sys.flags.interactive != 1) or not hasattr(QtCore, 'PYQT_VERSION'):
-            QtGui.QApplication.instance().exec_()
+        self.timer = QtCore.QTimer()
+        print("Hello")
 
     def set_plotdata(self, name, data_x, data_y):
-        if name in self.traces:
-            self.traces[name].setData(data_x, data_y)
-        else:
-            if name == 'waveform':
-                self.traces[name] = self.waveform.plot(pen='c', width=3)
-                self.waveform.setYRange(0, 255, padding=0)
-                self.waveform.setXRange(0, 2 * self.CHUNK, padding=0.005)
-            if name == 'spectrum':
-                self.traces[name] = self.spectrum.plot(pen='m', width=3)
-                self.spectrum.setLogMode(x=True, y=True)
-                self.spectrum.setYRange(-4, 0, padding=0)
-                self.spectrum.setXRange(np.log10(20),
-                                        np.log10(self.RATE / 2),
-                                        padding=0.005)
+        print("Heelo")
 
     def update(self):
-        wf_data = self.data
-        wf_data = struct.unpack(str(2 * self.CHUNK) + 'B', wf_data)
-        wf_data = np.array(wf_data, dtype='b')[::2] + 128
-        self.set_plotdata(
-            name='waveform',
-            data_x=self.x,
-            data_y=wf_data,
-        )
-
-        sp_data = fft(np.array(wf_data, dtype='int8') - 128)
-        sp_data = np.abs(
-            sp_data[0:int(self.CHUNK / 2)]) * 2 / (128 * self.CHUNK)
-        self.set_plotdata(name='spectrum', data_x=self.f, data_y=sp_data)
+        self.stream.write(self.data)
+        print("Heelo")
 
     def animation(self):
         timer = QtCore.QTimer()
@@ -116,8 +191,14 @@ class AudioStream(object):
         timer.start(20)
         self.start()
 
+    def close(self):
+        if not self.stream == None:
+            self.stream.close()
+
 
 if __name__ == '__main__':
-
+    app = QApplication(sys.argv)
     audio_app = AudioStream()
     audio_app.animation()
+    audio_app.close()
+    sys.exit(app.exec_())
